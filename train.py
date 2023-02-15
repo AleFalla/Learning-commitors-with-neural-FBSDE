@@ -51,7 +51,7 @@ mlp_args = {
     'hidden_layers': 5, 
     'width': 256, 
     'input_dim': 17, 
-    'activation': nn.Tanh(), 
+    'activation': nn.LeakyReLU(), 
     'batch_norm': False,
     'dropout': False
     }
