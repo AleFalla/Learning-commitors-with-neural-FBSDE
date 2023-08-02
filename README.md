@@ -100,15 +100,9 @@ trainer.fit(model, train_loader, valid_loader)
 ```
 ## Animations of first results
 
-<div style="display: flex;">
-    <div style="flex: 50%;">
-        <img src="./committor_animation.gif" alt="GIF 1" style="width: 100%;" />
-    </div>
-    <div style="flex: 50%;">
-        <img src="./trajs_animation.gif" alt="GIF 2" style="width: 100%;" />
-    </div>
-</div>
-
+| GIF 1                                | GIF 2                                |
+| ----------------------------------- | ----------------------------------- |
+| ![GIF 1](./committor_animation.gif) | ![GIF 2](./trajs_animation.gif) |
 
 
 ## Contributing
