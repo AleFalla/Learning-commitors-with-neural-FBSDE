@@ -99,12 +99,10 @@ trainer = pl.Trainer(accelerator="gpu", devices=1, max_epochs=20000, gradient_cl
 trainer.fit(model, train_loader, valid_loader) 
 ```
 ## Animations of first results
-
-<div style="display: flex; flex-direction: row;">
-    <img src="./committor_animation.gif" width="400" />
-    <img src="./trajs_animation.gif" width="400" />
-</div>
-
+Here the solution found by the network for the committor
+![](committor_animation.gif)
+Here some driven and non driven trajectories with MB potential
+![](trajs_animation.gif)
 
 ## Contributing
 
