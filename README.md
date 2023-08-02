@@ -102,7 +102,7 @@ trainer.fit(model, train_loader, valid_loader)
 
 | GIF 1                                | GIF 2                                |
 | ----------------------------------- | ----------------------------------- |
-| ![GIF 1](./committor_animation.gif) | ![GIF 2](./trajs_animation.gif) |
+| ![GIF 1](./committor_animation_c.gif) | ![GIF 2](./trajs_animation_c.gif) |
 
 
 ## Contributing
