@@ -1,109 +1,121 @@
-import pytorch_lightning as pl
-import Utilities as ut
 import torch
+import pytorch_lightning as pl
 from torch import nn
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader
 from model import Hitting_prob_model
-import math
 from Langevin import Langevin_Dyn
-from model import Hitting_prob_model
 from pytorch_lightning.callbacks import ModelCheckpoint
-import numpy as np
 from Data_Handler import Data_Handler
+
+torch.set_default_dtype(torch.float32)
 
 if torch.cuda.is_available():
     device = 'cuda'
 else:
     device = 'cpu'
 
+
 class Sine_activation(nn.Module):
     def __init__(self):
         '''
-        Init method.
+        Initializes the Sine_activation module.
         '''
-        super().__init__() # init the base class
-    
+        super().__init__()  # Init the base class
+
     def forward(self, input):
         '''
-        Forward pass of the function.
+        Forward pass of the Sine_activation function.
+
+        Args:
+            input (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after applying the Sine activation function.
         '''
         return torch.sin(input)
 
-final_state = torch.tensor([[-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.],
-                            [-2.,0.]]).cuda()
 
-mask = torch.tensor([[1.,0.],
-                     [1.,0.],
-                     [1.,0.],
-                     [1.,0.],
-                     [1.,0.],
-                     [1.,0.],
-                     [1.,0.],
-                     [1.,0.]]).cuda()
+class B_ID(nn.Module):
+    def __init__(self):
+        '''
+        Initializes the B_ID module.
+        '''
+        super().__init__()  # Init the base class
+
+    def forward(self, input):
+        '''
+        Forward pass of the B_ID function.
+
+        Args:
+            input (torch.Tensor): Input tensor.
+
+        Returns:
+            torch.Tensor: Output tensor after applying the B_ID function.
+        '''
+        return input + ((input**2 + 1)**(.5) - 1) / 2
+
+
+initial_state = torch.tensor([[-0.6, 1.5],
+                              ], device=device)
+
+final_state = torch.tensor([[.6, -0],
+                            ], device=device)
+
+mask = torch.tensor([[1., 1.],
+                     ]).to(torch.device(device))
 
 mlp_args = {
-    'hidden_layers': 5, 
-    'width': 256, 
-    'input_dim': 17, 
-    'activation': nn.LeakyReLU(), 
-    'batch_norm': False,
+    'hidden_layers': 5,
+    'width': 256,
+    'input_dim': 3,
+    'activation': Sine_activation(),
+    'norm': False,
     'dropout': False
-    }
+}
 
 boundary_args = {
-    'reference' : final_state,
-    'tolerance' : .9,
-    'slope' : 0.001,
-    'mask' : mask,
-    'keyword': 'Bump' #alternatives 'Bump', 'Sigmoid'
+    'reference': final_state,
+    'tolerance': .2,
+    'slope': .01,
+    'mask': mask,
+    'keyword': 'Sigmoid'  # alternatives 'Bump', 'Sigmoid', 'Indicator'
 }
 
 FBSDE_args = {
-    'grad' : True,
+    'grad': False,
     'alpha': 1,
-    'beta': .01
-}
-
-normalization_dict = {
-    'ph_space_means': torch.tensor([0,0]).cuda(),
-    'time_mean': torch.tensor([0]).cuda(),
-    'ph_space_stds': torch.tensor([5,15]).cuda(),
-    'time_std': torch.tensor([1]).cuda()
+    'beta': 0  # 1
 }
 
 model_args = {
-    'mlp_args': mlp_args, 
-    'boundary_args': boundary_args, 
-    'FBSDE_args':  FBSDE_args,
-    'normalization_dict': normalization_dict
+    'mlp_args': mlp_args,
+    'boundary_args': boundary_args,
+    'FBSDE_args': FBSDE_args,
+    'initial_lr': 1e-3,
+    'loss_type': 'type 2'
 }
 
 model = Hitting_prob_model(**model_args)
 
-def xavier_init(model):
-    for name, param in model.named_parameters():
-        if name.endswith(".bias"):
-            param.data.fill_(0)
-        else:
-            bound = math.sqrt(6) / math.sqrt(param.shape[0] + param.shape[1])
-            param.data.uniform_(-bound, bound)
 
-xavier_init(model)
-data = Data_Handler(
-)
+def init_weights(m):
+    if isinstance(m, nn.Linear):
+        torch.nn.init.xavier_uniform_(m.weight, gain=nn.init.calculate_gain('relu'))
+        m.bias.data.fill_(0)
+
+
+model.apply(init_weights)
+
+data = Data_Handler()
+
 data = data.load_datas_from_files()
-training_set = data['train_dataset']#TensorDataset(data_train, data_B_train)
-validation_set = data['val_dataset']#TensorDataset(data_val, data_B_val)
-train_loader = DataLoader(training_set, batch_size = 100, shuffle = True)
-valid_loader = DataLoader(validation_set, batch_size = len(validation_set))
+training_set = data['train_dataset']
+validation_set = data['val_dataset']
+print(len(training_set))
+train_loader = DataLoader(training_set, batch_size=50, shuffle=True)
+valid_loader = DataLoader(validation_set, batch_size=int(0.25 * len(validation_set)), shuffle=True)
 
+checkpoint_callback = ModelCheckpoint(dirpath="checkpoints_final_/", save_top_k=2, monitor="val_loss", save_last=True)
 
-checkpoint_callback = ModelCheckpoint(dirpath="checkpoints_s/", save_top_k=1, monitor="val_loss")
-trainer = pl.Trainer(accelerator="gpu", devices=1, callbacks=[checkpoint_callback], max_epochs = 1000, gradient_clip_val = 2, gradient_clip_algorithm = "norm")
+trainer = pl.Trainer(accelerator="gpu", devices=1, callbacks=[checkpoint_callback], max_epochs=20000, gradient_clip_val=.5, gradient_clip_algorithm="norm")
 trainer.fit(model, train_loader, valid_loader)

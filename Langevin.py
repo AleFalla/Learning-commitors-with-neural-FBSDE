@@ -11,9 +11,8 @@ class Langevin_Dyn():
     dt,
     temperature,
     initial_state,
-    masses,
-    drag,
     potential,
+    drag,
     potential_args,
     device = 'cuda'
     ) -> None:
@@ -40,21 +39,7 @@ class Langevin_Dyn():
         self.paths_number = initial_state.size(0)
         self.potential = potential
         self.potential_args = potential_args
-        self.device = device
-
-        # check the length of masses list
-        # if one then it's the same for all particles and can be just a float
-        if len(masses) == 1:
-            self.masses = masses.view(-1)
         
-        # if bigger than 1 then it's different for each particle
-        elif len(masses) > 1:
-            self.masses = masses
-        
-        # if the number of masses and the number of particles extrapolated by the initial state is different, raise an error
-        elif len(masses) != int(initial_state.size(1)/2):
-            raise TypeError("you used a masses vector, but it has a different size wrt the chosen system")
-
         # check the length of temperature list
         # if one then consider the same for all trajectories, hence repeat it
         if len(temperature) == 1:
@@ -68,108 +53,71 @@ class Langevin_Dyn():
         elif len(temperature)!=int(initial_state.size(0)):
             raise TypeError("you used a temperature vector, but it has a different size wrt the batch of simulations")
 
-        # repeat the drag coefficient dimensionality*particles times
         self.drag = drag
-
-        self.diffusion_coeff = None
+        self.Gamma = ((2*self.temperature/self.drag)**0.5).view(-1,1)
 
     def compute_drifts(self, current_state):
         """
         Computes the drift component A in the Langevin SDE dX = Adt + BdW
+        In this case A*dt = -gradU(x)*dt/gamma 
         """
+        
         #separate velocities and positions
-        velocities = current_state[:, :, self.dimensionality::]
-        positions = current_state[:, :, 0:self.dimensionality]
+        positions = current_state
 
         #compute deterministic forces
-        positions = Variable(positions, requires_grad = True)
+        positions.requires_grad_() #= Variable(positions, requires_grad = True)
+        
         U = self.potential(positions, **self.potential_args)
+        
         forces = - derivative(positions, U, retain_graph = True, create_graph = True)
 
         #get the drift components that will go in the update
-        position_drift = velocities
-        velocity_drift_drag = - torch.einsum('ijk,j->ijk', velocities, self.drag/self.masses) # -(gamma/m_j)*v_jk where j runs on particles and k on dimensionality (e.g. xyz)
-        velocity_drift_potential = torch.einsum('ijk,j->ijk', forces, 1/self.masses) # (1/m_j)*(-d(U(x))/dx_jk) where j runs on particles and k on dimensionality (e.g. xyz)
-        velocity_drift = velocity_drift_drag + velocity_drift_potential
-        A = torch.cat((position_drift, velocity_drift), dim = 2)
+        A = forces/self.drag
 
         return A
-    
-
-    def compute_diffusions(self, current_state):
-        """
-        Computes the diffusion component B for the Langevni SDE dX = Adt + BdW
-        """
-        
-        # here we have the outer product of 2*gamma*T_i and 1/m_j where i runs on paths and j runs on particles
-        Gammas = torch.einsum('i,j->ij', ((2*self.drag*self.temperature)**0.5), 1/self.masses)
-
-        #here I generate the generic embedding for the diffusion matrices, there will be one per path per particle essentially
-        embedding = torch.eye(current_state.size(2), device = self.device).view(1,1,current_state.size(2), current_state.size(2))
-        embedding = embedding.repeat(current_state.size(0), current_state.size(1), 1, 1)
-        embedding[:, :, 0:self.dimensionality, 0:self.dimensionality] = 0.
-
-        #actual computation of diffusion matrices
-        Diffusions = torch.einsum('ijkl, ij -> ijkl', embedding, Gammas)
-
-        return Diffusions
 
 
     def compute_driven_drifts(self, current_state, committor_model, time):
         """
         Computes the drift component A in the Langevin SDE dX = Adt + BdW considering also the optimal driving -grad(log(q)) with q committor
         """
-        
-        #separate velocities and positions
-        velocities = current_state[:, :, self.dimensionality::]
-        positions = current_state[:, :, 0:self.dimensionality]
 
         #compute deterministic forces
-        positions = Variable(positions, requires_grad = True)
+        positions = current_state
+        positions.requires_grad_()# = Variable(current_state, requires_grad = True)
         U = self.potential(positions, **self.potential_args)
         forces = - derivative(positions, U, retain_graph = True, create_graph = True)
 
         #compute the control part of the drift, that is to say 
-        current_state = Variable(current_state, requires_grad = True)
-        hitting_prob = committor_model(current_state, time)
-        grad_log_q = derivative(current_state, torch.log(hitting_prob))
+        positions = current_state
+        positions.requires_grad_()# = Variable(current_state, requires_grad = True)
+        hitting_prob = committor_model(positions, time)
+        grad_log_q = derivative(positions, torch.log(hitting_prob))
+        driving = (self.Gamma**2)*grad_log_q
         
-        #get the driving term
-        B = self.compute_diffusions(current_state)
-        B_2 = torch.einsum('ijkm, ijml -> ijkl', B, torch.transpose(B, 2, 3))
-        driving = torch.einsum('ijkl, ijl -> ijk', B_2, grad_log_q)
-        
-        #compute the total driving for positions and velocities separately
-        position_drift_driving = driving[:, :, 0:self.dimensionality]
-        velocity_drift_driving = driving[:, :, self.dimensionality::]
-        position_drift = velocities + position_drift_driving
-        velocity_drift_drag = - torch.einsum('ijk,j->ijk', velocities, self.drag/self.masses) # -(gamma/m_j)*v_jk where j runs on particles and k on dimensionality (e.g. xyz)
-        velocity_drift_potential = torch.einsum('ijk,j->ijk', forces, 1/self.masses) # (1/m_j)*(-d(U(x))/dx_jk) where j runs on particles and k on dimensionality (e.g. xyz)
-        velocity_drift = velocity_drift_drag + velocity_drift_potential + velocity_drift_driving
-        
-        #stick it back together
-        A = torch.cat((position_drift, velocity_drift), dim = 2)
+        #get the drift components that will go in the update
+        A = forces/self.drag + driving
 
         return A
-    
     
     def Dyn_step(self, current_state, wiener_increment):
         """
         Runs a single step Euler-Maruyama integration starting in the current state in the non-driven case
         """
         A = self.compute_drifts(current_state)
-        B = self.compute_diffusions(current_state)
-        increment = A * self.dt + torch.einsum('ijkl, ijl -> ijk', B, wiener_increment)
-        return current_state + increment, B
+        increment = A * self.dt + self.Gamma * wiener_increment
+        
+        return current_state + increment
     
     def Dyn_step_driven(self, current_state, committor_model, time, wiener_increment):
         """
         Runs a single step Euler-Maruyama integration starting in the current state in the driven case using the specified model for hitting probability calculation
         """
         A = self.compute_driven_drifts(current_state, committor_model, time)
-        B = self.compute_diffusions(current_state)
-        increment = A * self.dt + torch.einsum('ijkl, ijl -> ijk', B, wiener_increment)
-        return current_state + increment, B
+        increment = A * self.dt + self.Gamma * wiener_increment
+        
+        return current_state + increment
     
     def Dyn_run(self, current_state):
         """
@@ -178,52 +126,117 @@ class Langevin_Dyn():
         """
         # Here I decided for a format (batch_size, time, particles, ph_space coordinates)
         trajs = current_state.view(current_state.size(0), 1, current_state.size(1), current_state.size(2))
+        
+        # I get the value for the drift term to initialize the array of drifts (to keep it in memory in case of PDE loss)
+        A = self.compute_drifts(current_state)
+        As = A.view(A.size(0), 1, A.size(1), A.size(2))
+        
+        # I initialize the time axis
         time_axis = [0]
-        wiener_increment = torch.zeros_like(current_state, device = self.device)
+        
+        # I sample the first wiener_increment and initialize the vector of increments to keep memory for the integration of Y in the FBSDE method
+        wiener_increment = (torch.randn_like(current_state)*(self.dt**0.5)).to(current_state.device)
         wiener_increment = wiener_increment.float()
         wiener_increments = (wiener_increment.view((current_state.size(0), 1, current_state.size(1), current_state.size(2))),)
 
-        # time iteration
+        # at this point I have t=0, the current state as initial state, the sampled wiener increment and the drift term initialized based on the current state
+        # then I go into the time iteration
         for t in tqdm(range(1,self.steps+1)):
-            current_state, B = self.Dyn_step(current_state, wiener_increment)
+            
+            # first I update the current state X_{t-1} -> X_{t} of the system based on the values of wiener increment and drift (computed internally as a function of X_{t-1}) at time t-1  
+            current_state = self.Dyn_step(current_state, wiener_increment)
+            
+            # now I compute the new drifts and append them
+            A = self.compute_drifts(current_state)
+            As = torch.cat((As, A.view(A.size(0), 1, A.size(1), A.size(2))), dim = 1)
+            
+            # append the new state to the trajectories tensor
             trajs = torch.cat((trajs, current_state.view(current_state.size(0), 1, current_state.size(1), current_state.size(2))), dim = 1)
+            
+            # append the updated time
             time_axis.append(t*self.dt)
-            wiener_increment = torch.randn_like(current_state, device = self.device)*(self.dt**0.5)
+            
+            # finally I sample the new wiener increment dW_{t} and append it to the wiener increments vector
+            wiener_increment = (torch.randn_like(current_state)*(self.dt**0.5)).to(current_state.device)
             wiener_increment = wiener_increment.float()
             wiener_increments = wiener_increments + (wiener_increment.view((current_state.size(0), 1, current_state.size(1), current_state.size(2))),)
             
+            # at this point I have time t, state X_{t} and wiener increment dW_{t} which will be used in the next iteration to do the update t->t+1
+            # consider that at every time we noe have (t, X_{t}, dW_{t}) and that is all we need
+            
         
-        #turn to tensors time and wiener increments
-        time_axis = torch.tensor(time_axis, device = self.device).view(1,-1,1).repeat(current_state.size(0), 1, 1)
+        # finally I turn the time axis into a tensor, repeated per each batch and with extra dummy dimension for each scalar value
+        time_axis = (torch.tensor(time_axis).view(1,-1,1).repeat(current_state.size(0), 1, 1)).to(current_state.device)
+        
+        # I make the wiener increments tuple into a tensor
         wiener_increments = torch.cat(wiener_increments, dim = 1)
         
-        return trajs, time_axis, wiener_increments, B
+        # for the B component the cases are two, either we are considering a different temperature per trajectory or all the same
+        if self.Gamma.size(0) == 1:
+            B = self.Gamma.repeat(current_state.size(0), 1)
+        else:
+            B = self.Gamma
+        
+        return trajs, time_axis, wiener_increments, As, B
     
     def Dyn_run_driven(self, current_state, committor_model):
         """
         Runs a full Langevin dynamics for the number of steps specified in the initialization of the class, driving the dynamics with the specified model for the committor
         Starts in the current state and returns trajectories and time axis
         """
-        # Here I decided for a format (batch_size, time, system coordinates)
+        # Here I decided for a format (batch_size, time, particles, ph_space coordinates)
         trajs = current_state.view(current_state.size(0), 1, current_state.size(1), current_state.size(2))
         
+        # I get the value for the drift term to initialize the array of drifts (to keep it in memory in case of PDE loss)
+        A = self.compute_driven_drifts(current_state, committor_model, torch.tensor([0]).view(1,-1).repeat(current_state.size(0),1))
+        As = A.view(A.size(0), 1, A.size(1), A.size(2))
+        
+        # I initialize the time axis
         time_axis = [0]
-        t = 0
-        time = torch.tensor(t*self.dt, device = self.device).repeat(current_state.size(0), 1)
-
-        wiener_increment = torch.zeros_like(current_state, device = self.device)
+        
+        # I sample the first wiener_increment and initialize the vector of increments to keep memory for the integration of Y in the FBSDE method
+        wiener_increment = (torch.randn_like(current_state)*(self.dt**0.5)).to(current_state.device)
         wiener_increment = wiener_increment.float()
+        wiener_increments = (wiener_increment.view((current_state.size(0), 1, current_state.size(1), current_state.size(2))),)
 
+        # at this point I have t=0, the current state as initial state, the sampled wiener increment and the drift term initialized based on the current state
+        # then I go into the time iteration
         for t in tqdm(range(1,self.steps+1)):
-            current_state, B = self.Dyn_step_driven(current_state, committor_model, time, wiener_increment)
-            trajs = torch.cat((trajs, current_state.view(current_state.size(0), 1, current_state.size(1), current_state.size(2))), dim = 1)
-            time_axis.append(t*self.dt)
-            time = torch.tensor(t*self.dt, device = self.device).repeat(current_state.size(0), 1)
-            wiener_increment = torch.randn_like(current_state, device = self.device)*(self.dt**0.5)
-            wiener_increment = wiener_increment.float()
             
-        time_axis = torch.tensor(time_axis, device = self.device)
-
+            # first I update the current state X_{t-1} -> X_{t} of the system based on the values of wiener increment and drift (computed internally as a function of X_{t-1}) at time t-1  
+            current_state = self.Dyn_step_driven(current_state, committor_model, torch.tensor([(t-1)*self.dt]).view(1,-1).repeat(current_state.size(0),1), wiener_increment)
+            
+            # now I compute the new drifts and append them
+            A = self.compute_driven_drifts(current_state, committor_model, torch.tensor([t*self.dt]).view(1,-1).repeat(current_state.size(0),1))
+            As = torch.cat((As, A.view(A.size(0), 1, A.size(1), A.size(2))), dim = 1)
+            
+            # append the new state to the trajectories tensor
+            trajs = torch.cat((trajs, current_state.view(current_state.size(0), 1, current_state.size(1), current_state.size(2))), dim = 1)
+            
+            # append the updated time
+            time_axis.append(t*self.dt)
+            
+            # finally I sample the new wiener increment dW_{t} and append it to the wiener increments vector
+            wiener_increment = (torch.randn_like(current_state)*(self.dt**0.5)).to(current_state.device)
+            wiener_increment = wiener_increment.float()
+            wiener_increments = wiener_increments + (wiener_increment.view((current_state.size(0), 1, current_state.size(1), current_state.size(2))),)
+            
+            # at this point I have time t, state X_{t} and wiener increment dW_{t} which will be used in the next iteration to do the update t->t+1
+            # consider that at every time we noe have (t, X_{t}, dW_{t}) and that is all we need
+            
+        
+        # finally I turn the time axis into a tensor, repeated per each batch and with extra dummy dimension for each scalar value
+        time_axis = (torch.tensor(time_axis).view(1,-1,1).repeat(current_state.size(0), 1, 1)).to(current_state.device)
+        
+        # I make the wiener increments tuple into a tensor
+        wiener_increments = torch.cat(wiener_increments, dim = 1)
+        
+        # for the B component the cases are two, either we are considering a different temperature per trajectory or all the same
+        if self.Gamma.size(0) == 1:
+            B = self.Gamma.repeat(current_state.size(0), 1)
+        else:
+            B = self.Gamma
+        
         return trajs, time_axis, B
     
     def Data_generation(self):
@@ -232,8 +245,8 @@ class Langevin_Dyn():
         Generates trajectories based on the args given in initialization
         Returns trajectories, time, wiener increments and diffusion matrices
         """
-        trajs, time_axis, wiener_increments, B = self.Dyn_run(self.initial_state)
-        return trajs, time_axis, wiener_increments, B
+        trajs, time_axis, wiener_increments, A, B = self.Dyn_run(self.initial_state)
+        return trajs, time_axis, wiener_increments, A, B
 
             
 
