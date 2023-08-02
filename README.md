@@ -43,8 +43,6 @@ To use this codebase, follow these steps:
 
 5. Train the model using PyTorch Lightning and the provided training loops.
 
-
-
 ## Examples
 
 Here's an example of how to use the code to solve the collective variable problem:
@@ -100,6 +98,13 @@ valid_loader = DataLoader(validation_set, batch_size=int(0.25 * len(validation_s
 trainer = pl.Trainer(accelerator="gpu", devices=1, max_epochs=20000, gradient_clip_val=.5, gradient_clip_algorithm="norm")
 trainer.fit(model, train_loader, valid_loader) 
 ```
+## Animations of first results
+
+<div style="display: flex; flex-direction: row;">
+    <img src="./committor_animation.gif" width="400" />
+    <img src="./trajs_animation.gif" width="400" />
+</div>
+
 
 ## Contributing
 
